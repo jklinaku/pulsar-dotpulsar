@@ -19,13 +19,13 @@ using System;
 /// <summary>
 /// Any error related to AvroISpecificSchema
 /// </summary>
-public sealed class AvroISpecificRecordSchemaException : DotPulsarException
+public sealed class SchemaException : DotPulsarException
 {
-    public AvroISpecificRecordSchemaException(string message) : base(message)
+    public SchemaException(string message) : base(message)
     {
     }
 
-    public AvroISpecificRecordSchemaException(string message, Exception innerException) : base(message, innerException)
+    public SchemaException(string message, Exception innerException) : base(message, innerException)
     {
     }
 }
