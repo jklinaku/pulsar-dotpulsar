@@ -18,6 +18,9 @@ using DotNet.Testcontainers.Builders;
 using DotNet.Testcontainers.Containers;
 using DotNet.Testcontainers.Networks;
 using DotPulsar.Abstractions;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
 using Testcontainers.Pulsar;
 using Toxiproxy.Net;
 using Xunit.Abstractions;
@@ -28,6 +31,8 @@ public class IntegrationFixture : IAsyncLifetime
     private const int PulsarPort = 6650;
     private const int ToxiProxyControlPort = 8474;
     private const int ToxiProxyPort = 15124;
+    public static readonly string DEFAULT_TENANT = "public";
+    public static readonly string DEFAULT_NAMESPACE = "default";
     private readonly CancellationTokenSource _cts;
     private readonly IMessageSink _messageSink;
     private readonly INetwork _network;
@@ -127,15 +132,48 @@ public class IntegrationFixture : IAsyncLifetime
         return await _pulsarCluster.CreateAuthenticationTokenAsync(expiryTime, cancellationToken);
     }
 
-    private static string CreateTopicName() => $"persistent://public/default/{Guid.NewGuid():N}";
+    private static string CreateTopicName(string? pulsarNamespace = null, string? tenant = null)
+        => $"persistent://{tenant ?? DEFAULT_TENANT}/{pulsarNamespace ?? DEFAULT_NAMESPACE}/{Guid.NewGuid():N}";
 
-    public async Task<string> CreateTopic(CancellationToken cancellationToken)
+    public async Task<string> CreateTopic(CancellationToken cancellationToken, string? pulsarNamespace = null, string? tenant = null)
     {
-        var topic = CreateTopicName();
+        //if the default namespace and tenant are used no need to create. OtherWise check if they are already there and create them if not
+        if (!(pulsarNamespace == null && tenant == null))
+        {
+            if (!await DoesNameSpaceExist(pulsarNamespace, tenant, cancellationToken))
+            {
+                await CreateNamespace(pulsarNamespace, tenant);
+            }
+        }
+        var topic = CreateTopicName(pulsarNamespace,tenant);
         await CreateTopic(topic, cancellationToken);
         return topic;
     }
+    public async Task<bool> DoesNameSpaceExist(string? pulsarNamespace, string? tenant = null, CancellationToken cancellationToken)
+    {
 
+        var arguments = $"bin/pulsar-admin namespaces list {tenant ?? DEFAULT_TENANT}/{pulsarNamespace}";
+        var result = await _pulsarCluster.ExecAsync(["/bin/bash", "-c", arguments], cancellationToken);
+
+        if (result.ExitCode != 0)
+            throw new Exception($"Could not create the topic: {result.Stderr}");
+        var namespaces = result.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                                              .Select(ns => ns.Trim())
+                                              .ToList();
+        if (namespaces == null || namespaces.Count == 0)
+            return false; // No namespaces found
+
+        // Check if the namespace exists in the result
+        return namespaces.Any(ns => ns.Trim().Equals($"{tenant}/{pulsarNamespace}", StringComparison.OrdinalIgnoreCase));
+    }
+    public async Task CreateNamespace(string pulsarNamespace, string? tenant = null)
+    {
+        var arguments = $"pulsar-admin namespaces create test-tenant/test-namespace";
+        var result = await _pulsarCluster.ExecAsync(["/bin/bash", "-c", arguments], cancellationToken);
+
+        if (result.ExitCode != 0)
+            throw new Exception($"Could not create the topic: {result.Stderr}");
+    }
     public async Task CreateTopics(IEnumerable<string> topics, CancellationToken cancellationToken)
     {
         foreach (var topic in topics)
@@ -147,13 +185,36 @@ public class IntegrationFixture : IAsyncLifetime
     public async Task CreateTopic(string topic, CancellationToken cancellationToken)
     {
         var arguments = $"bin/pulsar-admin topics create {topic}";
-
         var result = await _pulsarCluster.ExecAsync(["/bin/bash", "-c", arguments], cancellationToken);
 
         if (result.ExitCode != 0)
             throw new Exception($"Could not create the topic: {result.Stderr}");
     }
+    public async Task AddSchemaToExistingTopic(string topic, SchemaInfo pulsarSchemaInfo, CancellationToken cancellationToken)
+    {
+        var schDef = new
+        {
+            type = nameof(pulsarSchemaInfo.Type).ToUpper(),
+            schema = Encoding.UTF8.GetString(pulsarSchemaInfo.Data),
+            properties = new Dictionary<string, string>()
+        };
+        string schemaFilename = $"{Guid.NewGuid().ToString()}.sch";
+        await _pulsarCluster.CopyAsync(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(schDef)), $"pulsar/{schemaFilename}",ct: cancellationToken);
+        string arguments = $"bin/pulsar-admin schemas upload --filename {schemaFilename} {topic}";
+        var result = await _pulsarCluster.ExecAsync(["/bin/bash", "-c", arguments], cancellationToken);
 
+        if (result.ExitCode != 0)
+            throw new Exception($"Could not upload a schema to topic: {result.Stderr}");
+
+    }
+    public async Task EnableSchemaValidationInNamespace(string tenantNamespace, CancellationToken cancellationToken)
+    {
+        string arguments = $"bin/pulsar-admin namespaces set-schema-validation-enforce --enable {tenantNamespace}";
+        var result = await _pulsarCluster.ExecAsync(["/bin/bash", "-c", arguments], cancellationToken);
+
+        if (result.ExitCode != 0)
+            throw new Exception($"Could not enable schema validation in tenant/namespace: {result.Stderr}");
+    }
     public async Task<string> CreatePartitionedTopic(int numberOfPartitions, CancellationToken cancellationToken)
     {
         var topic = CreateTopicName();
